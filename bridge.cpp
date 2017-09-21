@@ -150,8 +150,10 @@ void Bridge::user(char *str, ...)
 
 void Bridge::debug(char *str, ...)
 {
+#if 1
   va_list va;
   va_start(va, str);
   vprintf(str, va);
   va_end(va);
+#endif 
 }

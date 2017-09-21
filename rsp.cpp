@@ -112,7 +112,7 @@ Rsp::loop() {
   struct timeval tv;
 
   while (this->get_packet(pkt, &len)) {
-    log->debug("Received $%.*s\n", len, pkt);
+    log->debug("Received %d $%s\n", len, pkt);
     if (!this->decode(pkt, len))
       return false;
   }
@@ -146,6 +146,7 @@ Rsp::decode(char* data, size_t len) {
 
   case 's':
   case 'S':
+            //data[0]='S'; //bug in step...
     return this->step(&data[0], len);
 
   case 'H':
@@ -237,6 +238,7 @@ Rsp::step(char* data, size_t len) {
   }
 
   if (sscanf(data, "%x", &addr) == 1) {
+      log->debug("step addr %x\n",addr);
     dbgif = this->get_dbgif(m_thread_sel);
     // only when we have received an address
     dbgif->read(DBG_NPC_REG, &npc);
@@ -244,7 +246,8 @@ Rsp::step(char* data, size_t len) {
     if (npc != addr)
       dbgif->write(DBG_NPC_REG, addr);
   }
-
+  this->get_dbgif(m_thread_sel)->read(DBG_NPC_REG, &npc);
+  log->debug("step npc = 0x%x\n", npc);
   m_thread_sel = 0;
 
   return this->resume(true);
@@ -362,7 +365,8 @@ Rsp::v_packet(char* data, size_t len) {
     this->send_str("OK");
     return false;
   }
-  else if (strncmp ("vCont?", data, strlen ("vCont?")) == 0)
+  else if ((strncmp ("vCont?", data, strlen ("vCont?")) == 0)||\
+            (strncmp("vMustRelplyEmpty",data,strlen("vMustReplyEmpty"))))
   {
     return this->send_str("");
   }
@@ -440,6 +444,12 @@ Rsp::regs_send() {
   return this->send_str(regs_str);
 }
 
+#define RISCV_FIRST_CSR 66
+
+static uint32_t csr_table[]={
+#include "csrdecode.h"
+};
+
 bool
 Rsp::reg_read(char* data, size_t len) {
   uint32_t addr;
@@ -450,13 +460,22 @@ Rsp::reg_read(char* data, size_t len) {
     fprintf(stderr, "Could not parse packet\n");
     return false;
   }
-
   if (addr < 32)
     this->get_dbgif(m_thread_sel)->gpr_read(addr, &rdata);
   else if (addr == 0x20)
     this->pc_read(&rdata);
-  else
-    return this->send_str("");
+  else if ((addr>0x20)&&(addr < RISCV_FIRST_CSR)) {
+  	
+  	return this->send_str("xxxxxxxx");
+	//rdata=0xffffffff;
+   }
+  else if ((addr>=RISCV_FIRST_CSR)&&(addr<=0x100)) //mcause
+   {
+   /*csr address has a 65 offset in gdb */
+    this->get_dbgif(m_thread_sel)->csr_read(csr_table[addr-RISCV_FIRST_CSR], &rdata); 
+   }
+    else
+  	return this->send_str("xxxxxxxx");
 
   rdata = htonl(rdata);
   snprintf(data_str, 9, "%08x", rdata);
@@ -481,10 +500,15 @@ Rsp::reg_write(char* data, size_t len) {
   dbgif = this->get_dbgif(m_thread_sel);
   if (addr < 32)
     dbgif->gpr_write(addr, wdata);
-  else if (addr == 32)
+  else if (addr == 32){
     dbgif->write(DBG_NPC_REG, wdata);
-  else
-    return this->send_str("E01");
+    dbgif->write(DBG_PPC_REG, 0x80);
+  }
+  else if((addr>=RISCV_FIRST_CSR)&&(addr<=0x400))
+	{
+     	  this->get_dbgif(m_thread_sel)->csr_write(addr-RISCV_FIRST_CSR,wdata);
+	}
+  else  return this->send_str("E01");
 
   return this->send_str("OK");
 }
@@ -628,16 +652,16 @@ Rsp::signal() {
       return false;
     if (!dbgif->read(DBG_CAUSE_REG, &cause))
       return false;
-
+    log->debug("HIT %d, cause %x\n",hit, cause);
     if (hit & 0x1)
       signal = TARGET_SIGNAL_TRAP;
     else if(cause & (1 << 31))
       signal = TARGET_SIGNAL_INT;
-    else if(cause & (1 << 3))
+    else if(cause==0x03)
       signal = TARGET_SIGNAL_TRAP;
-    else if(cause & (1 << 2))
+    else if(cause==0x02)
       signal = TARGET_SIGNAL_ILL;
-    else if(cause & (1 << 5))
+    else if(cause==0x05)
       signal = TARGET_SIGNAL_BUS;
     else
       signal = TARGET_SIGNAL_STOP;
@@ -826,26 +850,29 @@ Rsp::resumeCore(DbgIF* dbgif, bool step) {
   dbgif->read(DBG_CAUSE_REG, &cause);
 
   // if there is a breakpoint at this address, let's remove it and single-step over it
-  bool hasStepped = false;
+  //bool hasStepped = false;
+  log->debug("resume core step=%x, ppc=%x npc=%x\n", step, \
+                                ppc, npc);
+  //if (m_bp->at_addr(ppc)&&(!step)) {
+  //  log->debug("step at bp\n");
+  //  m_bp->disable(ppc);
+  //  dbgif->write(DBG_NPC_REG, ppc); // re-execute this instruction
+  //  dbgif->write(DBG_CTRL_REG, 0x1); // single-step
+  //  m_bp->enable(ppc);
+  //  hasStepped = true;
+  //}
 
-  if (m_bp->at_addr(ppc)) {
-    m_bp->disable(ppc);
-    dbgif->write(DBG_NPC_REG, ppc); // re-execute this instruction
-    dbgif->write(DBG_CTRL_REG, 0x1); // single-step
-    m_bp->enable(ppc);
-    hasStepped = true;
-  }
-
-  if (!step || !hasStepped) {
+  //if (!step || !hasStepped) {
     // clear hit register, has to be done before CTRL
-    dbgif->write(DBG_HIT_REG, 0);
-
-    if (step)
+ //   dbgif->write(DBG_HIT_REG, 0);
+  
+  if (step){
+      dbgif->write(DBG_HIT_REG, 0);
       dbgif->write(DBG_CTRL_REG, 0x1);
-    else
-      dbgif->write(DBG_CTRL_REG, 0);
-  }
-
+   }
+  else
+    dbgif->write(DBG_CTRL_REG, 0);
+  //}
 }
 
 void
@@ -1080,7 +1107,7 @@ Rsp::bp_insert(char* data, size_t len) {
   }
 
   m_bp->insert(addr);
-
+  log->debug("insert bp @%x\n", addr);
   return this->send_str("OK");
 }
 
