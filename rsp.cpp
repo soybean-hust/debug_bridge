@@ -113,8 +113,10 @@ Rsp::loop() {
 
   while (this->get_packet(pkt, &len)) {
     log->debug("Received %d $%s\n", len, pkt);
-    if (!this->decode(pkt, len))
+    if (!this->decode(pkt, len)) {
+      printf("pkt decode error\n");
       return false;
+    }
   }
 
   return true;
@@ -444,7 +446,9 @@ Rsp::regs_send() {
   return this->send_str(regs_str);
 }
 
-#define RISCV_FIRST_CSR 66
+#define RISCV_FIRST_CSR 65
+#define RISCV_CSR_MSTATUS 0x340
+#define RISCV_CSR_LAST	  0xFFF
 
 static uint32_t csr_table[]={
 #include "csrdecode.h"
@@ -469,10 +473,11 @@ Rsp::reg_read(char* data, size_t len) {
   	return this->send_str("xxxxxxxx");
 	//rdata=0xffffffff;
    }
-  else if ((addr>=RISCV_FIRST_CSR)&&(addr<=0x100)) //mcause
+  else if ((addr>=RISCV_CSR_MSTATUS)&&(addr<=RISCV_CSR_LAST)) //csrs
    {
    /*csr address has a 65 offset in gdb */
-    this->get_dbgif(m_thread_sel)->csr_read(csr_table[addr-RISCV_FIRST_CSR], &rdata); 
+    //this->get_dbgif(m_thread_sel)->csr_read(csr_table[addr-RISCV_FIRST_CSR], &rdata); 
+    this->get_dbgif(m_thread_sel)->csr_read(addr-RISCV_FIRST_CSR, &rdata); 
    }
     else
   	return this->send_str("xxxxxxxx");
@@ -531,8 +536,9 @@ Rsp::get_packet(char* pkt, size_t* p_pkt_len) {
 
   // first look for start bit
   do {
+    printf("ready!\n");
     ret = recv(m_socket_client, &c, 1, 0);
-
+    printf("err=%x\n", ret);
     if((ret == -1 && errno != EWOULDBLOCK) || (ret == 0)) {
       fprintf(stderr, "RSP: Error receiving\n");
       return false;

@@ -175,7 +175,7 @@ FpgaIF::access(bool write, unsigned int addr, int size, char* buffer) {
    }
   } else {
     // read
-    printf("read %d bytes\n", size);
+    //printf("read %d bytes\n", size);
     // bytes
     if (addr & 0x1) {
       be = addr&0x03; 
